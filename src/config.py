@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,14 +9,20 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        env_ignore_empty=True,  # a blank value in .env falls back to the default
     )
 
     database_url: str = "postgresql+psycopg://cardpulse:cardpulse@localhost:5432/cardpulse"
     pokemon_tcg_api_key: str | None = None
     pokemon_tcg_base_url: str = "https://api.pokemontcg.io/v2"
-    price_api_key: str | None = None
-    price_api_base_url: str = ""
     log_level: str = "INFO"
+
+    # --- price ingestion ---
+    price_source_name: str = "pokemontcg"
+    price_api_base_url: str = ""  # blank = the adapter's own default URL
+    price_api_key: str | None = None
+    price_request_timeout_seconds: float = Field(default=30.0, gt=0)
+    price_max_pages: int = Field(default=1, ge=0)  # 0 = all pages
 
     @field_validator("log_level")
     @classmethod

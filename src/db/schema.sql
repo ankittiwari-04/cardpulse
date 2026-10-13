@@ -179,3 +179,75 @@ CREATE TABLE IF NOT EXISTS fct_price_anomalies (
 ALTER TABLE raw_card_catalog ALTER COLUMN payload_hash SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_card_catalog_version
     ON raw_card_catalog (source, source_card_id, payload_hash);
+
+-- ---------- Phase 3: price observations ----------
+-- raw_price_observation: one append-only row per observation version.
+ALTER TABLE raw_price_observation
+    ADD COLUMN IF NOT EXISTS observation_key  TEXT,
+    ADD COLUMN IF NOT EXISTS observation_type TEXT,
+    ADD COLUMN IF NOT EXISTS price            NUMERIC(12, 4),
+    ADD COLUMN IF NOT EXISTS currency         TEXT,
+    ADD COLUMN IF NOT EXISTS payload_hash     TEXT;
+
+ALTER TABLE raw_price_observation
+    ALTER COLUMN source_card_ref  SET NOT NULL,
+    ALTER COLUMN observed_at      SET NOT NULL,
+    ALTER COLUMN observation_key  SET NOT NULL,
+    ALTER COLUMN observation_type SET NOT NULL,
+    ALTER COLUMN price            SET NOT NULL,
+    ALTER COLUMN currency         SET NOT NULL,
+    ALTER COLUMN payload_hash     SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_price_observation_version
+    ON raw_price_observation (
+        source, source_card_ref, observation_key, observation_type,
+        observed_at, price, currency, payload_hash
+    );
+
+-- stg_price_observations: typed observation, one row per raw row. Unknown values stay NULL.
+ALTER TABLE stg_price_observations
+    ADD COLUMN IF NOT EXISTS observation_type TEXT,
+    ADD COLUMN IF NOT EXISTS observation_key  TEXT,
+    ADD COLUMN IF NOT EXISTS source_url       TEXT,
+    ADD COLUMN IF NOT EXISTS condition_label  TEXT,
+    ADD COLUMN IF NOT EXISTS language_label   TEXT,
+    ADD COLUMN IF NOT EXISTS edition_label    TEXT,
+    ADD COLUMN IF NOT EXISTS variant_label    TEXT,
+    ADD COLUMN IF NOT EXISTS grading_company  TEXT,
+    ADD COLUMN IF NOT EXISTS grade_value     NUMERIC(3, 1),
+    ADD COLUMN IF NOT EXISTS is_sold          BOOLEAN,
+    ADD COLUMN IF NOT EXISTS listing_id       TEXT;
+
+ALTER TABLE stg_price_observations
+    ALTER COLUMN price TYPE NUMERIC(12, 4),
+    ALTER COLUMN currency DROP DEFAULT,  -- never silently assume USD
+    ALTER COLUMN observation_type SET NOT NULL,
+    ALTER COLUMN observation_key  SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_stg_price_observations_raw
+    ON stg_price_observations (raw_id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_raw_price_observation_type'
+                     AND conrelid = 'raw_price_observation'::regclass) THEN
+        ALTER TABLE raw_price_observation ADD CONSTRAINT ck_raw_price_observation_type
+            CHECK (observation_type IN ('completed_sale', 'asking_price',
+                   'provider_aggregate', 'auction_result', 'unknown'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_raw_price_observation_price'
+                     AND conrelid = 'raw_price_observation'::regclass) THEN
+        ALTER TABLE raw_price_observation ADD CONSTRAINT ck_raw_price_observation_price
+            CHECK (price > 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_stg_price_observations_type'
+                     AND conrelid = 'stg_price_observations'::regclass) THEN
+        ALTER TABLE stg_price_observations ADD CONSTRAINT ck_stg_price_observations_type
+            CHECK (observation_type IN ('completed_sale', 'asking_price',
+                   'provider_aggregate', 'auction_result', 'unknown'));
+    END IF;
+END
+$$;

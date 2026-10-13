@@ -99,3 +99,95 @@ dimension_inserted, dimension_updated, ...).
     SELECT count(*) FROM stg_cards;
     SELECT count(*) FROM dim_cards;
     SELECT source_card_id, count(*) FROM raw_card_catalog GROUP BY 1 HAVING count(*) > 1;
+
+## Price ingestion (Phase 3)
+
+### Data flow
+
+    price source adapter (e.g. Pokemon TCG API tcgplayer / cardmarket blocks)
+        -> validate every observation (pure rules, no I/O)
+        -> raw_price_observation   verbatim JSON, append-only, one row per observation version
+        -> stg_price_observations  typed row per raw row (unknown values stay NULL)
+        -> data_quality_alerts     one alert per rule violation; rejected rows are NOT stored
+
+No matching to canonical cards happens in this phase: source_card_ref is only the
+source's own card reference.
+
+### Observation types
+
+completed_sale, asking_price, provider_aggregate, auction_result, unknown.
+The pokemontcg adapter emits only provider_aggregate. The type is preserved exactly as
+the adapter reports it, and a completed_sale is only accepted when the source explicitly
+marks it sold (is_sold = true).
+
+### Why sold prices and asking prices differ
+
+An asking price is what a seller hopes for; a completed sale is what a buyer actually
+paid. Asking prices drift above sale prices, especially for high-demand cards, so mixing
+them biases any price series. Provider aggregates (market, trend, average, low) are
+statistics computed by the provider and say nothing about individual sales. CardPulse
+keeps the type on every row so later phases never have to guess.
+
+### Raw immutability and idempotency
+
+- raw_price_observation.payload is the original JSON object from the response (for the
+  pokemontcg adapter: the tcgplayer or cardmarket block, unmodified).
+- payload_hash = SHA-256 of canonical JSON (sorted keys, compact separators).
+- Unique index: (source, source_card_ref, observation_key, observation_type, observed_at,
+  price, currency, payload_hash). observation_key (e.g. tcgplayer/normal/market) is part
+  of it so two variants of one card with equal prices are not collapsed.
+- Same observation fetched again -> the existing row is reused. Changed observation ->
+  a new raw row. Raw rows are never updated or deleted.
+- stg_price_observations has one row per raw row (unique raw_id); reruns insert nothing.
+
+### Validation rules (rejected observations are recorded in data_quality_alerts)
+
+- missing_source_card_ref, missing_observation_key
+- missing_observed_at (also: timestamps without a timezone; they are never guessed;
+  date-only values are stored as 00:00 UTC, so precision is one day)
+- missing_price, invalid_price, non_positive_price
+- invalid_currency (must be 3 uppercase letters)
+- invalid_observation_type, unsupported_sale_claim
+- impossible_grade (1-10 in half-point steps), only checked when the source gives a grade
+- duplicate_listing_id (same source listing id twice within one run)
+
+Grading company, grade, condition, language and edition are only stored when the source
+provides them. The pokemontcg adapter provides none of them.
+
+### Pipeline run tracking
+
+Each non-dry run inserts a data_pipeline_runs row (pipeline_name = price_ingest) before
+fetching. rows_read = observations extracted; rows_written = newly inserted raw + staging
+rows. metadata holds raw_inserted, raw_reused, staging_inserted, staging_unchanged,
+rejected_count, alert_count, alert_checks (counts per rule), pages_fetched and
+items_without_price_data (cards with no price block). Failures are recorded in their own
+transaction with a sanitized error message.
+
+### Configuration (.env)
+
+    PRICE_SOURCE_NAME=pokemontcg         # adapter name
+    PRICE_API_BASE_URL=                  # blank = adapter default
+    PRICE_API_KEY=                       # blank = pokemontcg adapter uses POKEMON_TCG_API_KEY
+    PRICE_REQUEST_TIMEOUT_SECONDS=30
+    PRICE_MAX_PAGES=1                    # 0 = all pages; one page = up to 250 cards
+
+To add a provider, implement PriceSourceClient (src/ingestion/prices.py) and register it
+in ADAPTERS.
+
+### Commands
+
+    make ingest-prices ARGS="--dry-run --max-pages 1"       # fetch + validate, write nothing
+    make ingest-prices ARGS="--max-pages 1 --query set.id:base1"
+    python -m src.ingestion.prices --max-pages 1
+    make test
+    export TEST_DATABASE_URL=postgresql+psycopg://cardpulse:cardpulse@localhost:5432/cardpulse_test
+    make test-integration
+
+### Verification SQL
+
+    SELECT run_id, status, rows_read, rows_written, metadata FROM data_pipeline_runs
+      WHERE pipeline_name = 'price_ingest' ORDER BY run_id DESC LIMIT 5;
+    SELECT observation_type, currency, count(*) FROM raw_price_observation GROUP BY 1, 2;
+    SELECT check_name, count(*) FROM data_quality_alerts GROUP BY 1 ORDER BY 2 DESC;
+    SELECT count(*) FROM stg_price_observations s LEFT JOIN raw_price_observation r
+      ON r.id = s.raw_id WHERE r.id IS NULL;

@@ -28,8 +28,7 @@ ingest-catalog:
 	$(PY) -m src.ingestion.catalog $(ARGS)
 
 ingest-prices:
-	@echo "ingest-prices is not implemented yet (planned for a later phase)."
-	@exit 1
+	$(PY) -m src.ingestion.prices $(ARGS)
 
 test-integration:
 	@test -n "$$TEST_DATABASE_URL" || { echo "Set TEST_DATABASE_URL first"; exit 1; }
