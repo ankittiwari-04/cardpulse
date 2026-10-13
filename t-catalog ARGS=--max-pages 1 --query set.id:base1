@@ -1,0 +1,5 @@
+ run_id |  status   | rows_read | rows_written |                                                                                                                        metadata                                                                                                                         
+--------+-----------+-----------+--------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      1 | succeeded |       102 |          306 | {"query": "set.id:base1", "max_pages": 1, "raw_reused": 0, "raw_inserted": 102, "pages_fetched": 1, "staging_updated": 0, "staging_inserted": 102, "dimension_updated": 0, "staging_unchanged": 0, "dimension_inserted": 102, "dimension_unchanged": 0}
+(1 row)
+
