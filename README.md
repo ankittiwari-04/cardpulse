@@ -1,6 +1,47 @@
 # CardPulse
 
-Pokemon trading-card pricing and data-quality platform.
+CardPulse is an end-to-end Pokémon trading-card pricing and data-quality platform.
+
+It ingests catalog and provider-aggregate price data, resolves observations to canonical cards,
+computes daily market values with confidence and buyback guidance, detects pricing anomalies,
+and exposes an internal API and analyst dashboard.
+
+## Highlights
+
+- Idempotent raw, staging, and canonical data layers
+- Pokémon TCG API ingestion with retries and validation
+- Deterministic and fuzzy entity resolution
+- Daily market-value modeling with transparent confidence scoring
+- Conservative buyback pricing policy
+- Anomaly and data-quality monitoring
+- FastAPI internal service
+- Streamlit analyst dashboard
+- 217 passing tests
+
+## Demo
+
+Start the API:
+
+    make run-api
+
+Start the dashboard:
+
+    make run-dashboard
+
+Open:
+
+- API docs: http://localhost:8000/docs
+- Dashboard: http://localhost:8501
+
+Example:
+
+    curl -s "http://localhost:8000/cards/37/market-value"
+
+## Important data distinction
+
+All currently ingested prices are provider_aggregate values published by TCGplayer or Cardmarket
+through the Pokémon TCG API. They are not completed sales and do not imply transaction volume.
+
 
 ## Goal
 
