@@ -1,7 +1,7 @@
 PY ?= python
 ARGS ?= --max-pages 1
 
-.PHONY: test-integration install fmt lint test db-migrate run-api ingest-catalog ingest-prices
+.PHONY: match-cards test-integration install fmt lint test db-migrate run-api ingest-catalog ingest-prices
 
 install:
 	$(PY) -m pip install --upgrade pip
@@ -33,3 +33,8 @@ ingest-prices:
 test-integration:
 	@test -n "$$TEST_DATABASE_URL" || { echo "Set TEST_DATABASE_URL first"; exit 1; }
 	$(PY) -m pytest -q -rs tests/test_catalog_integration.py
+
+MATCH_ARGS ?= --limit 1000
+
+match-cards:
+	$(PY) -m src.matching.resolve $(MATCH_ARGS)

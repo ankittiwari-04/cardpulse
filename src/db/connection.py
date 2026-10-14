@@ -24,12 +24,15 @@ def describe_dsn(dsn: str) -> str:
 
 
 @contextmanager
-def transaction(dsn: str | None = None) -> Iterator[psycopg.Connection]:
+def transaction(dsn: str | None = None, *, read_only: bool = False) -> Iterator[psycopg.Connection]:
     """One connection = one transaction.
 
     Commits on clean exit, rolls back on exception, always closes the connection.
-    Defaults to the DATABASE_URL from Settings.
+    Defaults to the DATABASE_URL from Settings. read_only=True makes the database
+    itself reject any write on this connection.
     """
     resolved = normalize_dsn(dsn) if dsn else get_settings().psycopg_dsn
     with psycopg.connect(resolved) as conn:
+        if read_only:
+            conn.read_only = True
         yield conn

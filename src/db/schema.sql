@@ -251,3 +251,37 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ---------- Phase 4: entity resolution ----------
+-- fct_card_matches: exactly one row per staged observation.
+ALTER TABLE fct_card_matches
+    ADD COLUMN IF NOT EXISTS explanation JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS run_id      BIGINT REFERENCES data_pipeline_runs (run_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_fct_card_matches_observation
+    ON fct_card_matches (stg_observation_id);
+CREATE INDEX IF NOT EXISTS idx_fct_card_matches_status ON fct_card_matches (status);
+CREATE INDEX IF NOT EXISTS idx_fct_card_matches_card ON fct_card_matches (card_key);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_fct_card_matches_method'
+                     AND conrelid = 'fct_card_matches'::regclass) THEN
+        ALTER TABLE fct_card_matches ADD CONSTRAINT ck_fct_card_matches_method
+            CHECK (match_method IN ('deterministic', 'fuzzy', 'manual', 'none'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_fct_card_matches_score'
+                     AND conrelid = 'fct_card_matches'::regclass) THEN
+        ALTER TABLE fct_card_matches ADD CONSTRAINT ck_fct_card_matches_score
+            CHECK (match_score IS NULL OR (match_score >= 0 AND match_score <= 100));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_fct_card_matches_card'
+                     AND conrelid = 'fct_card_matches'::regclass) THEN
+        ALTER TABLE fct_card_matches ADD CONSTRAINT ck_fct_card_matches_card
+            CHECK (status NOT IN ('auto', 'confirmed') OR card_key IS NOT NULL);
+    END IF;
+END
+$$;

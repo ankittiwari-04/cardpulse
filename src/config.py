@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,10 +24,20 @@ class Settings(BaseSettings):
     price_request_timeout_seconds: float = Field(default=30.0, gt=0)
     price_max_pages: int = Field(default=1, ge=0)  # 0 = all pages
 
+    # --- entity resolution ---
+    match_auto_threshold: float = Field(default=90.0, ge=0, le=100)
+    match_review_min_score: float = Field(default=50.0, ge=0, le=100)
+
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:
         return value.upper()
+
+    @model_validator(mode="after")
+    def _review_min_not_above_auto(self) -> "Settings":
+        if self.match_review_min_score > self.match_auto_threshold:
+            raise ValueError("MATCH_REVIEW_MIN_SCORE must not exceed MATCH_AUTO_THRESHOLD")
+        return self
 
     @property
     def psycopg_dsn(self) -> str:

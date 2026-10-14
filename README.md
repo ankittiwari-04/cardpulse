@@ -191,3 +191,83 @@ in ADAPTERS.
     SELECT check_name, count(*) FROM data_quality_alerts GROUP BY 1 ORDER BY 2 DESC;
     SELECT count(*) FROM stg_price_observations s LEFT JOIN raw_price_observation r
       ON r.id = s.raw_id WHERE r.id IS NULL;
+
+## Entity resolution (Phase 4)
+
+### Matching flow
+
+    stg_price_observations (no match row yet)
+        -> stage 1  deterministic: source_card_ref == dim_cards.card_id (authoritative sources)
+        -> stage 2  attribute matching: normalize -> candidates -> score -> threshold
+        -> fct_card_matches  exactly one row per observation, with an explanation (JSONB)
+
+Run: make match-cards MATCH_ARGS="--limit 1000" or python -m src.matching.resolve --limit 1000
+Flags: --limit (0 = all), --source, --dry-run (read-only transaction, writes nothing),
+--reprocess (also reconsider review rows), --batch-size.
+
+### Deterministic versus fuzzy
+
+Deterministic matching is preferred: when a source's own reference IS the canonical card
+id (pokemontcg), a lookup is exact, instant and cannot be wrong because of spelling,
+reordering or ambiguous set names. Fuzzy matching exists for sources without such ids
+(marketplace titles). match_method = deterministic only for the source-reference stage.
+Every other accepted match is recorded as fuzzy, including exact name + set + number;
+the rule in explanation says which it was. If a pokemontcg reference is not in dim_cards,
+attributes are NOT allowed to override it: the observation goes to review.
+
+### Hard constraints
+
+If the observation states a set, only cards of that set are candidates. If it states a
+number, only cards with that number are candidates. A similar name never overrides a
+conflicting set or number; such cards are listed as excluded (with the reason) in the
+explanation. "Base Set" and "Base" are the same set; "Base Set 2" is a different one.
+
+### Confidence (0-100) and thresholds
+
+    source reference                          100
+    set AND number exact                      50 + 0.45 * name_similarity   (exact name = 95)
+    only one of set / number known            30 + 0.40 * name_similarity   (max 70)
+    name only                                 0.60 * name_similarity        (max 60)
+
+name_similarity is RapidFuzz token_sort_ratio on normalized names (0-100).
+MATCH_AUTO_THRESHOLD (default 90): at or above this a candidate is accepted (status auto).
+MATCH_REVIEW_MIN_SCORE (default 50): below this a candidate is not even suggested.
+Two candidates within 2 points of each other are never auto-accepted (rule: ambiguous).
+Only set + number exact matches can reach the auto threshold.
+
+### Review queue
+
+Observations that are not accepted get status review, match_method none and card_key NULL.
+The best candidates (score, rule, name similarity) and the near-misses excluded by
+conflicts are in explanation. match_score holds the best candidate's score (NULL when there
+was no candidate). Humans resolve a row by setting status confirmed (with a card_key) or
+rejected. confirmed and rejected rows are never changed by the pipeline; --reprocess only
+revisits review rows, and the write SQL itself only updates rows whose status is review.
+
+### Normalization
+
+Language, edition and grade labels are normalized and recorded in the explanation
+(en / 1st_edition / PSA 10 ...) but never used to choose the card, because dim_cards holds
+card designs only. Unknown or unparseable values stay unknown; nothing is guessed.
+
+### Limitations
+
+- Marketplace titles must already be split into name, set and number fields; free-text
+  title parsing is not implemented.
+- Set matching is exact on normalized names; there is no alias table (e.g. "BS" for Base).
+- Name similarity ignores language; non-English card names are not translated.
+- The printed total in "4/102" is dropped, not used as a set signal.
+- Only card designs are matched; variants, finishes and gradings are not part of the match.
+
+### Verification SQL
+
+    SELECT status, match_method, count(*) FROM fct_card_matches GROUP BY 1, 2 ORDER BY 1, 2;
+    SELECT count(*) AS unmatched_observations FROM stg_price_observations s
+      LEFT JOIN fct_card_matches m ON m.stg_observation_id = s.id WHERE m.match_id IS NULL;
+    SELECT stg_observation_id, count(*) FROM fct_card_matches GROUP BY 1 HAVING count(*) > 1;
+    SELECT m.stg_observation_id, s.raw_card_name, s.raw_set_name, s.raw_card_number,
+           m.match_score, m.explanation->>'rule' AS rule
+      FROM fct_card_matches m JOIN stg_price_observations s ON s.id = m.stg_observation_id
+      WHERE m.status = 'review' ORDER BY m.match_score DESC NULLS LAST LIMIT 20;
+    SELECT run_id, status, rows_read, rows_written, metadata FROM data_pipeline_runs
+      WHERE pipeline_name = 'entity_resolution' ORDER BY run_id DESC LIMIT 3;
