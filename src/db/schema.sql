@@ -285,3 +285,122 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ---------- Phase 5: pricing ----------
+-- fct_daily_card_prices: one row per series per day. observation_type and observation_key
+-- join the grain so different measures/types are never blended.
+ALTER TABLE fct_daily_card_prices
+    ADD COLUMN IF NOT EXISTS observation_type   TEXT,
+    ADD COLUMN IF NOT EXISTS observation_key    TEXT,
+    ADD COLUMN IF NOT EXISTS price_dispersion   NUMERIC(10, 6),
+    ADD COLUMN IF NOT EXISTS latest_price       NUMERIC(12, 4),
+    ADD COLUMN IF NOT EXISTS latest_observed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS freshness_days     INTEGER,
+    ADD COLUMN IF NOT EXISTS as_of_date         DATE,
+    ADD COLUMN IF NOT EXISTS computed_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ADD COLUMN IF NOT EXISTS run_id             BIGINT REFERENCES data_pipeline_runs (run_id);
+
+ALTER TABLE fct_daily_card_prices
+    ALTER COLUMN min_price    TYPE NUMERIC(12, 4),
+    ALTER COLUMN max_price    TYPE NUMERIC(12, 4),
+    ALTER COLUMN avg_price    TYPE NUMERIC(12, 4),
+    ALTER COLUMN median_price TYPE NUMERIC(12, 4),
+    ALTER COLUMN currency DROP DEFAULT,  -- never silently assume USD
+    ALTER COLUMN observation_type SET NOT NULL,
+    ALTER COLUMN observation_key  SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+        WHERE c.conrelid = 'fct_daily_card_prices'::regclass
+          AND c.contype = 'p' AND a.attname = 'observation_key'
+    ) THEN
+        ALTER TABLE fct_daily_card_prices DROP CONSTRAINT fct_daily_card_prices_pkey;
+        ALTER TABLE fct_daily_card_prices ADD PRIMARY KEY (
+            card_key, grade_id, price_date, source, currency, observation_type, observation_key
+        );
+    END IF;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS fct_card_market_values (
+    card_key                  BIGINT   NOT NULL REFERENCES dim_cards (card_key),
+    grade_id                  INTEGER  NOT NULL REFERENCES dim_grades (grade_id),
+    as_of_date                DATE     NOT NULL,
+    observation_type          TEXT     NOT NULL
+        CHECK (observation_type IN ('completed_sale', 'asking_price', 'provider_aggregate',
+                                    'auction_result', 'unknown')),
+    currency                  CHAR(3)  NOT NULL,
+    observation_key           TEXT     NOT NULL,
+    methodology_version       TEXT     NOT NULL,
+    price_7d_median           NUMERIC(12, 4),
+    price_30d_median          NUMERIC(12, 4),
+    price_7d_change_pct       NUMERIC(12, 4),
+    price_30d_change_pct      NUMERIC(12, 4),
+    observation_count_7d      INTEGER  NOT NULL DEFAULT 0,
+    observation_count_30d     INTEGER  NOT NULL DEFAULT 0,
+    price_dispersion          NUMERIC(10, 6),
+    source_agreement_score    NUMERIC(5, 4),
+    confidence_score          NUMERIC(5, 2) CHECK (confidence_score BETWEEN 0 AND 100),
+    confidence_components     JSONB    NOT NULL DEFAULT '{}'::jsonb,
+    liquidity_tier            TEXT,
+    buyback_tier              TEXT,
+    buyback_discount          NUMERIC(5, 4),
+    recommended_market_value  NUMERIC(12, 2) CHECK (recommended_market_value >= 0),
+    recommended_buy_price     NUMERIC(12, 2) CHECK (recommended_buy_price >= 0),
+    recommended_retail_price  NUMERIC(12, 2) CHECK (recommended_retail_price >= 0),
+    recommended_buyback_price NUMERIC(12, 2) CHECK (recommended_buyback_price >= 0),
+    policy                    JSONB    NOT NULL DEFAULT '{}'::jsonb,
+    latest_observed_at        TIMESTAMPTZ,
+    computed_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    run_id                    BIGINT REFERENCES data_pipeline_runs (run_id),
+    PRIMARY KEY (card_key, grade_id, as_of_date, observation_type, currency,
+                 observation_key, methodology_version)
+);
+CREATE INDEX IF NOT EXISTS idx_fct_card_market_values_asof ON fct_card_market_values (as_of_date);
+
+-- fct_price_anomalies: rerunnable via dedupe_key (one row per finding per as-of date).
+ALTER TABLE fct_price_anomalies
+    ADD COLUMN IF NOT EXISTS as_of_date         DATE,
+    ADD COLUMN IF NOT EXISTS stg_observation_id BIGINT REFERENCES stg_price_observations (id),
+    ADD COLUMN IF NOT EXISTS source             TEXT,
+    ADD COLUMN IF NOT EXISTS observation_type   TEXT,
+    ADD COLUMN IF NOT EXISTS observation_key    TEXT,
+    ADD COLUMN IF NOT EXISTS currency           TEXT,
+    ADD COLUMN IF NOT EXISTS dedupe_key         TEXT,
+    ADD COLUMN IF NOT EXISTS run_id             BIGINT REFERENCES data_pipeline_runs (run_id);
+
+ALTER TABLE fct_price_anomalies
+    ALTER COLUMN expected_price TYPE NUMERIC(12, 4),
+    ALTER COLUMN observed_price TYPE NUMERIC(12, 4),
+    ALTER COLUMN as_of_date SET NOT NULL,
+    ALTER COLUMN dedupe_key SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_fct_price_anomalies_dedupe
+    ON fct_price_anomalies (dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_fct_price_anomalies_card
+    ON fct_price_anomalies (card_key, as_of_date);
+CREATE INDEX IF NOT EXISTS idx_fct_price_anomalies_type
+    ON fct_price_anomalies (anomaly_type, severity);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_fct_price_anomalies_type'
+                     AND conrelid = 'fct_price_anomalies'::regclass) THEN
+        ALTER TABLE fct_price_anomalies ADD CONSTRAINT ck_fct_price_anomalies_type
+            CHECK (anomaly_type IN ('duplicate_observation', 'missing_price',
+                   'non_positive_price', 'statistical_outlier', 'price_spike', 'price_drop',
+                   'stale_data', 'conflicting_sources', 'missing_match',
+                   'insufficient_observations'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_fct_price_anomalies_severity'
+                     AND conrelid = 'fct_price_anomalies'::regclass) THEN
+        ALTER TABLE fct_price_anomalies ADD CONSTRAINT ck_fct_price_anomalies_severity
+            CHECK (severity IN ('info', 'warning', 'error', 'critical'));
+    END IF;
+END
+$$;

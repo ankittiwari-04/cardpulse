@@ -1,7 +1,9 @@
 PY ?= python
 ARGS ?= --max-pages 1
+MATCH_ARGS ?= --limit 1000
+PRICING_ARGS ?= --as-of-date $(shell date +%F)
 
-.PHONY: match-cards test-integration install fmt lint test db-migrate run-api ingest-catalog ingest-prices
+.PHONY: install fmt lint test db-migrate run-api ingest-catalog ingest-prices match-cards compute-prices detect-anomalies test-integration
 
 install:
 	$(PY) -m pip install --upgrade pip
@@ -30,11 +32,15 @@ ingest-catalog:
 ingest-prices:
 	$(PY) -m src.ingestion.prices $(ARGS)
 
+match-cards:
+	$(PY) -m src.matching.resolve $(MATCH_ARGS)
+
+compute-prices:
+	$(PY) -m src.pricing.compute $(PRICING_ARGS)
+
+detect-anomalies:
+	$(PY) -m src.pricing.anomalies $(PRICING_ARGS)
+
 test-integration:
 	@test -n "$$TEST_DATABASE_URL" || { echo "Set TEST_DATABASE_URL first"; exit 1; }
 	$(PY) -m pytest -q -rs tests/test_catalog_integration.py
-
-MATCH_ARGS ?= --limit 1000
-
-match-cards:
-	$(PY) -m src.matching.resolve $(MATCH_ARGS)
