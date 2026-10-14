@@ -3,7 +3,7 @@ ARGS ?= --max-pages 1
 MATCH_ARGS ?= --limit 1000
 PRICING_ARGS ?= --as-of-date $(shell date +%F)
 
-.PHONY: install fmt lint test db-migrate run-api ingest-catalog ingest-prices match-cards compute-prices detect-anomalies test-integration
+.PHONY: run-dashboard install fmt lint test db-migrate run-api ingest-catalog ingest-prices match-cards compute-prices detect-anomalies test-integration
 
 install:
 	$(PY) -m pip install --upgrade pip
@@ -44,3 +44,6 @@ detect-anomalies:
 test-integration:
 	@test -n "$$TEST_DATABASE_URL" || { echo "Set TEST_DATABASE_URL first"; exit 1; }
 	$(PY) -m pytest -q -rs tests/test_catalog_integration.py
+
+run-dashboard:
+	$(PY) -m streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0

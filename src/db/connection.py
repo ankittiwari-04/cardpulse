@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
@@ -24,7 +25,13 @@ def describe_dsn(dsn: str) -> str:
 
 
 @contextmanager
-def transaction(dsn: str | None = None, *, read_only: bool = False) -> Iterator[psycopg.Connection]:
+def transaction(
+    dsn: str | None = None,
+    *,
+    read_only: bool = False,
+    connect_timeout: int | None = None,
+    row_factory: Any = None,
+) -> Iterator[psycopg.Connection]:
     """One connection = one transaction.
 
     Commits on clean exit, rolls back on exception, always closes the connection.
@@ -32,7 +39,12 @@ def transaction(dsn: str | None = None, *, read_only: bool = False) -> Iterator[
     itself reject any write on this connection.
     """
     resolved = normalize_dsn(dsn) if dsn else get_settings().psycopg_dsn
-    with psycopg.connect(resolved) as conn:
+    kwargs: dict[str, Any] = {}
+    if connect_timeout is not None:
+        kwargs["connect_timeout"] = connect_timeout
+    if row_factory is not None:
+        kwargs["row_factory"] = row_factory
+    with psycopg.connect(resolved, **kwargs) as conn:
         if read_only:
             conn.read_only = True
         yield conn

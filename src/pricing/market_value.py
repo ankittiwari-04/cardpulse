@@ -11,7 +11,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -26,7 +26,9 @@ from src.pricing.data import (
     PriceObservation,
     PricingConfig,
     PricingStats,
+    age_in_days,
     chunked,
+    in_age_window,
     is_headline,
     list_card_keys,
     load_grade_map,
@@ -128,7 +130,7 @@ def aggregate_daily(observations: Sequence[PriceObservation], as_of_date: date) 
                 price_dispersion=_q(cv, _Q6),
                 latest_price=_q(latest.price, _Q4),
                 latest_observed_at=latest.observed_at,
-                freshness_days=(as_of_date - latest.price_date).days,
+                freshness_days=age_in_days(latest.price_date, as_of_date),
                 as_of_date=as_of_date,
             )
         )
@@ -329,15 +331,26 @@ class MarketValueRow:
     latest_observed_at: datetime
 
 
-def _between(
-    observations: Sequence[PriceObservation], as_of: date, start_back: int, end_back: int
+def _window(
+    observations: Sequence[PriceObservation], as_of: date, start_age: int, end_age: int
 ) -> list[PriceObservation]:
-    low = as_of - timedelta(days=start_back)
-    high = as_of - timedelta(days=end_back)
-    return [o for o in observations if low <= o.price_date <= high]
+    """Observations whose age in days satisfies start_age <= age < end_age.
+
+    age = as-of date - observation date (UTC calendar days), so the as-of day has age 0.
+    Windows are half-open: they include start_age and exclude end_age.
+
+        7d window        0 <= age < 7       30d window       0 <= age < 30
+        previous 7d      7 <= age < 14      previous 30d    30 <= age < 60
+
+    Future observations (age < 0) are never included. Every count, median, change
+    percentage and coverage figure in this module is built from these windows.
+    """
+    return [o for o in observations if in_age_window(o.price_date, as_of, start_age, end_age)]
 
 
-def source_agreement(observations: Sequence[PriceObservation], config: PricingConfig) -> float | None:
+def source_agreement(
+    observations: Sequence[PriceObservation], config: PricingConfig
+) -> float | None:
     """1 - relative spread of per-source medians. None unless 2+ sources report the series."""
     by_source: dict[str, list[Decimal]] = defaultdict(list)
     for obs in observations:
@@ -359,12 +372,12 @@ def _build_row(
     config: PricingConfig,
 ) -> MarketValueRow | None:
     card_key, grade_id, obs_type, currency, obs_key = series
-    w7 = _between(observations, as_of, 6, 0)
-    w30 = _between(observations, as_of, 29, 0)
+    w7 = _window(observations, as_of, 0, 7)
+    w30 = _window(observations, as_of, 0, 30)
     if not w30:
         return None
-    prev7 = _between(observations, as_of, 13, 7)
-    prev30 = _between(observations, as_of, 59, 30)
+    prev7 = _window(observations, as_of, 7, 14)
+    prev30 = _window(observations, as_of, 30, 60)
 
     med7 = median([o.price for o in w7])
     med30 = median([o.price for o in w30])
@@ -374,7 +387,7 @@ def _build_row(
     basis, basis_label = (w7, "7d") if w7 else (w30, "30d")
     value = median([o.price for o in basis])
     latest = max(w30, key=lambda o: (o.observed_at, o.stg_id))
-    age_days = (as_of - latest.price_date).days
+    age_days = age_in_days(latest.price_date, as_of)
     cv = coefficient_of_variation([o.price for o in w30])
     agreement = source_agreement(basis, config)
     confidence = compute_confidence(

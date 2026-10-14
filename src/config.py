@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     pricing_retail_markup: float = Field(default=0.10, ge=0)
     pricing_unknown_liquidity: Literal["low", "medium"] = "low"
 
+    # --- dashboard ---
+    dashboard_api_url: str = "http://localhost:8000"
+
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:

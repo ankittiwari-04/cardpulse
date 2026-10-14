@@ -271,3 +271,86 @@ card designs only. Unknown or unparseable values stay unknown; nothing is guesse
       WHERE m.status = 'review' ORDER BY m.match_score DESC NULLS LAST LIMIT 20;
     SELECT run_id, status, rows_read, rows_written, metadata FROM data_pipeline_runs
       WHERE pipeline_name = 'entity_resolution' ORDER BY run_id DESC LIMIT 3;
+
+## Internal API and dashboard (Phase 6)
+
+### Run the full local stack (WSL)
+
+    sudo service postgresql start                      # PostgreSQL at localhost:5432
+    source .venv/bin/activate
+    make db-migrate
+    make ingest-catalog ARGS="--max-pages 1 --query set.id:base1"
+    make ingest-prices ARGS="--max-pages 1 --query set.id:base1"
+    make match-cards
+    make compute-prices PRICING_ARGS="--as-of-date $(date -u +%F)"
+    make detect-anomalies PRICING_ARGS="--as-of-date $(date -u +%F)"
+    make run-api            # terminal 1: http://localhost:8000  (docs at /docs)
+    make run-dashboard      # terminal 2: http://localhost:8501
+
+The dashboard reads the API at DASHBOARD_API_URL (default http://localhost:8000), so start the
+API first. The API has no authentication and binds 0.0.0.0 (see run-api); keep it on your own
+machine or network, or run uvicorn with --host 127.0.0.1.
+
+### API
+
+All endpoints are read-only and use a short-lived read-only database connection per request.
+List endpoints return {"total", "limit", "offset", "items"}. Errors: 404 unknown card (or no
+market value for the selection), 422 invalid parameters, 503 database unavailable.
+
+    curl -s localhost:8000/health
+    curl -s "localhost:8000/cards/search?q=charizard&set_name=base&limit=5&offset=0"
+    curl -s localhost:8000/cards/1
+    curl -s "localhost:8000/cards/1/market-value?currency=USD&observation_type=provider_aggregate"
+    curl -s "localhost:8000/cards/1/market-value?as_of_date=2026-10-14&currency=EUR"
+    curl -s "localhost:8000/cards/1/price-history?days=90&currency=USD"
+    curl -s "localhost:8000/cards/1/observations?limit=50&offset=0"
+    curl -s "localhost:8000/anomalies?severity=warning&anomaly_type=stale_data&limit=50"
+    curl -s localhost:8000/data-quality/summary
+
+    GET /health                         status, service, version, database, timestamp (503 if the DB is down)
+    GET /cards/search                   q, set_name, limit (default 20, max 100), offset
+    GET /cards/{card_key}               card details + latest_market_values
+    GET /cards/{card_key}/market-value  as_of_date (default: latest), observation_type, currency (default USD)
+    GET /cards/{card_key}/price-history days (default 90, max 365), observation_type, currency
+    GET /cards/{card_key}/observations  limit (default 50, max 200), offset (matched observations only)
+    GET /anomalies                      limit (default 50, max 200), offset, severity, anomaly_type, card_key
+    GET /data-quality/summary           counts, by source/type, latest successful runs, freshness, open anomalies
+
+A card has several price series (for example tcgplayer/normal/market in USD and
+cardmarket/trendPrice in EUR), so market-value returns a values list with one entry per series.
+Each entry carries observation_type, observation_type_note, confidence_score,
+confidence_components, methodology_version and data_freshness. Without as_of_date the latest
+available date for the card is used; an explicit date returns exactly that date or 404. Price
+history ends at the card's latest price_date and contains only stored days.
+unmatched_observations = observations that are neither matched nor in review (no match row, or
+rejected).
+
+### Dashboard
+
+make run-dashboard starts Streamlit on port 8501. Use the sidebar to search for a card and pick
+one; the tabs show the market value (7- and 30-day medians, changes, buyback/buy/retail
+estimates, confidence with each component and its explanation), the stored price history,
+recent matched observations, anomalies and data-quality counts. Pricing logic is not repeated
+in the dashboard; it only displays what the API returns.
+
+### Data limitations and disclaimer
+
+- Every current price is a provider_aggregate: a statistic published by TCGplayer or Cardmarket
+  through the Pokémon TCG API. It is NOT a completed sale and carries no transaction volume.
+  The API and the dashboard never call these prices sold prices.
+- History is only what the pipelines have stored. Dates without data are not filled in, and no
+  history is back-filled; with one ingestion run there is one day of history.
+- Buy, retail and buyback prices are policy-based estimates, not offers.
+- Confidence reflects data quality (count, recency, dispersion, agreement, completeness), not
+  the probability that a price is correct.
+- With a single source, source agreement cannot be assessed.
+- The API is internal: no authentication, no rate limiting, no caching.
+
+### Window semantics (pricing)
+
+    age = as-of date - observation date, in whole UTC days (the as-of day has age 0)
+    windows are half-open on age: start_age <= age < end_age
+    7d window    0 <= age < 7        30d window     0 <= age < 30
+    previous 7d  7 <= age < 14       previous 30d  30 <= age < 60
+    the same windows feed the medians, the counts, the change percentages and the
+    confidence recency/coverage inputs

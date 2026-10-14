@@ -133,7 +133,9 @@ def test_missing_and_non_positive_prices():
 
 def test_duplicate_observations():
     at = datetime(2026, 10, 14, tzinfo=UTC)
-    group = DuplicateGroup(7, [7, 9], 5, "pokemontcg", "provider_aggregate", "USD", "k", Decimal(10), at)
+    group = DuplicateGroup(
+        7, [7, 9], 5, "pokemontcg", "provider_aggregate", "USD", "k", Decimal(10), at
+    )
     (finding,) = duplicate_findings([group], D)
     assert finding.anomaly_type == "duplicate_observation" and finding.severity == "info"
     assert finding.stg_observation_id == 7
@@ -151,3 +153,24 @@ def test_missing_matches():
         ("missing_match", "warning"),
         ("missing_match", "info"),
     ]
+
+
+def test_dedupe_key_ignores_loader_ids_but_separates_distinct_observations():
+    base = [make_obs(k, 10) for k in range(5, 0, -1)]
+    first = detect([*base, make_obs(0, 16)])[0]
+    second = detect([*base, make_obs(0, 16)])[0]
+    assert first.stg_observation_id != second.stg_observation_id  # different synthetic row ids
+    assert first.dedupe_key == second.dedupe_key  # same logical anomaly, same key
+    assert first.dedupe_key.split("|")[-2:] == ["2026-10-14T00:00:00+00:00", "16"]
+    other_price = detect([*base, make_obs(0, 17)])[0]
+    assert other_price.dedupe_key != first.dedupe_key  # a genuinely different observation
+
+
+def test_numeric_details_are_json_numbers_not_strings():
+    import json
+
+    base = [make_obs(k, 10) for k in range(5, 0, -1)]
+    (spike,) = detect([*base, make_obs(0, 16)])
+    assert spike.details["change_pct"] == 60.0
+    assert isinstance(spike.details["change_pct"], float)
+    json.dumps(spike.details)  # serializable exactly as stored in JSONB

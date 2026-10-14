@@ -354,9 +354,27 @@ def resolve_as_of(value: date | None) -> date:
 
 
 def jsonable(value: Any) -> Any:
-    """Decimals and dates to JSON-safe values (used for explanation payloads)."""
+    """Make a value JSON-safe for JSONB details: numbers stay numbers, never strings.
+
+    Decimals become floats (a non-finite Decimal, which JSON cannot hold, becomes a string);
+    dates and datetimes become ISO strings; dicts and lists are converted recursively.
+    """
     if isinstance(value, Decimal):
-        return str(value)
+        return float(value) if value.is_finite() else str(value)
     if isinstance(value, date | datetime):
         return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): jsonable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [jsonable(v) for v in value]
     return value
+
+
+def age_in_days(observed_on: date, as_of_date: date) -> int:
+    """Whole UTC calendar days between an observation date and the as-of date (today = 0)."""
+    return (as_of_date - observed_on).days
+
+
+def in_age_window(observed_on: date, as_of_date: date, start_age: int, end_age: int) -> bool:
+    """Half-open window on age: start_age <= age < end_age (age 0 is the as-of date)."""
+    return start_age <= age_in_days(observed_on, as_of_date) < end_age

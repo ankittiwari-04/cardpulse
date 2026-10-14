@@ -15,7 +15,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -83,7 +83,18 @@ def make_finding(
     expected_price: Decimal | None = None,
     observed_price: Decimal | None = None,
     details: dict[str, Any] | None = None,
+    identity: Sequence[Any] = (),
 ) -> AnomalyFinding:
+    """Build a finding with a deterministic dedupe_key.
+
+    The key is made only of business attributes: anomaly type, as-of date, card, grade,
+    source, observation type, currency and series (observation_key), plus `identity`, which
+    separates findings that share a series: a finding about one specific staged row passes
+    that row's persistent staging id; a finding about one specific observation passes its
+    timestamp and price. stg_observation_id itself is stored for traceability but is NOT part
+    of the key. Thresholds are deliberately not in the key, so a changed rule updates the
+    existing finding (severity, details) instead of creating a second one.
+    """
     parts = [
         anomaly_type,
         as_of_date.isoformat(),
@@ -93,7 +104,7 @@ def make_finding(
         observation_type,
         currency,
         observation_key,
-        stg_observation_id,
+        *identity,
     ]
     dedupe_key = "|".join("-" if p is None else str(p) for p in parts)
     merged = {
@@ -116,6 +127,11 @@ def make_finding(
         details=merged,
         dedupe_key=dedupe_key,
     )
+
+
+def _observation_identity(obs: PriceObservation) -> tuple[str, str]:
+    """Stable identity of an observation: when it was observed and what it said."""
+    return (obs.observed_at.astimezone(UTC).isoformat(), format(obs.price.normalize(), "f"))
 
 
 # ---------- series-level rules (matched observations) ----------
@@ -200,6 +216,7 @@ def _movement(series, obs, as_of, config) -> list[AnomalyFinding]:
                         as_of,
                         source=today.source,
                         stg_observation_id=today.stg_id,
+                        identity=_observation_identity(today),
                         expected_price=med7,
                         observed_price=today.price,
                         details={
@@ -227,6 +244,7 @@ def _movement(series, obs, as_of, config) -> list[AnomalyFinding]:
                     as_of,
                     source=today.source,
                     stg_observation_id=today.stg_id,
+                    identity=_observation_identity(today),
                     expected_price=med,
                     observed_price=today.price,
                     details={
@@ -338,6 +356,7 @@ def price_problem_findings(rows: Sequence[PriceProblemRow], as_of: date) -> list
                 as_of,
                 card_key=row.card_key,
                 stg_observation_id=row.stg_id,
+                identity=(f"stg:{row.stg_id}",),
                 source=row.source,
                 observation_type=row.observation_type,
                 observation_key=row.observation_key,
@@ -357,6 +376,7 @@ def duplicate_findings(groups: Sequence[DuplicateGroup], as_of: date) -> list[An
             as_of,
             card_key=g.card_key,
             stg_observation_id=g.first_id,
+            identity=(f"stg:{g.first_id}",),
             source=g.source,
             observation_type=g.observation_type,
             observation_key=g.observation_key,
@@ -375,6 +395,7 @@ def missing_match_findings(rows: Sequence[UnmatchedRow], as_of: date) -> list[An
             "warning" if row.match_status is None else "info",
             as_of,
             stg_observation_id=row.stg_id,
+            identity=(f"stg:{row.stg_id}",),
             source=row.source,
             observation_type=row.observation_type,
             observation_key=row.observation_key,

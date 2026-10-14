@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.pricing.data import PriceObservation, PricingConfig, is_headline
+from src.pricing.data import PriceObservation, PricingConfig, in_age_window, is_headline
 from src.pricing.market_value import (
     aggregate_daily,
     build_market_values,
@@ -36,7 +36,15 @@ def make_obs(
 ):
     observed = datetime.combine(D - timedelta(days=days_ago), time(hour), tzinfo=UTC)
     return PriceObservation(
-        next(_ids), card_key, grade_id, source, obs_type, currency, key, Decimal(str(price)), observed
+        next(_ids),
+        card_key,
+        grade_id,
+        source,
+        obs_type,
+        currency,
+        key,
+        Decimal(str(price)),
+        observed,
     )
 
 
@@ -83,7 +91,9 @@ def test_daily_aggregation_groups_by_series_and_keeps_observation_type():
     ]
     rows = aggregate_daily(obs, D)
     assert len(rows) == 3
-    today = next(r for r in rows if r.price_date == D and r.observation_type == "provider_aggregate")
+    today = next(
+        r for r in rows if r.price_date == D and r.observation_type == "provider_aggregate"
+    )
     assert today.observation_count == 3
     assert (today.min_price, today.max_price) == (Decimal(10), Decimal(30))
     assert today.avg_price == Decimal(20) and today.median_price == Decimal(20)
@@ -122,12 +132,32 @@ def test_30_day_change_percentage():
 
 
 def test_window_boundaries():
+    """Windows are half-open on age: 7d is age 0..6 and 30d is age 0..29.
+
+    The age-7 observation is outside the 7-day window but inside the 30-day window.
+    The age-30 observation is outside the 30-day window; it starts the previous 30 days.
+    """
     obs = [make_obs(6, 10), make_obs(7, 99), make_obs(29, 20), make_obs(30, 99)]
     (row,) = build_market_values(obs, D, CFG)
-    assert row.observation_count_7d == 1  # offset 6 in, offset 7 out
-    assert row.observation_count_30d == 2  # offsets 6 and 29 in; 7 is in too (<= 29)
-    # offsets 6, 7 and 29 are inside 30d; 30 is outside
-    assert row.price_30d_median == Decimal(20) or row.observation_count_30d == 3
+
+    assert row.observation_count_7d == 1  # ages 0-6: only the age-6 observation
+    assert row.price_7d_median == Decimal(10)
+    assert row.observation_count_30d == 3  # ages 0-29: the observations aged 6, 7 and 29
+    assert row.price_30d_median == Decimal(20)  # median of 10, 99, 20
+
+    # the previous windows start exactly where the current ones end
+    assert row.price_7d_change_pct == Decimal("-89.8990")  # 10 vs the age-7 value 99
+    assert row.price_30d_change_pct == Decimal("-79.7980")  # 20 vs the age-30 value 99
+    assert row.recommended_market_value == Decimal("10.00")  # the 7d median is the basis
+
+
+def test_age_window_helper_is_half_open():
+    assert in_age_window(D, D, 0, 7)
+    assert in_age_window(D - timedelta(days=6), D, 0, 7)
+    assert not in_age_window(D - timedelta(days=7), D, 0, 7)
+    assert in_age_window(D - timedelta(days=7), D, 7, 14)
+    assert not in_age_window(D - timedelta(days=14), D, 7, 14)
+    assert not in_age_window(D + timedelta(days=1), D, 0, 7)  # future observations are excluded
 
 
 def test_missing_prior_window_gives_no_change():
@@ -184,7 +214,10 @@ def test_confidence_perfect_and_thin_evidence():
     )
     assert thin.score == pytest.approx(47.14, abs=0.01)
     parts = thin.components
-    assert parts["dispersion"]["score"] == 0.5 and "not assessable" in parts["dispersion"]["explanation"]
+    assert (
+        parts["dispersion"]["score"] == 0.5
+        and "not assessable" in parts["dispersion"]["explanation"]
+    )
     assert parts["source_agreement"]["score"] == 0.5
     assert sum(p["weighted"] for k, p in parts.items() if k != "total") * 100 == pytest.approx(
         thin.score, abs=0.05
